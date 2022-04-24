@@ -32,6 +32,7 @@ pub enum Error {
     GVariantDeserialization(zvariant::Error),
     Io(std::io::Error),
     MacError,
+    HashedAttributeMac(String),
 }
 
 impl From<zvariant::Error> for Error {
@@ -107,6 +108,34 @@ impl Keyring {
         Ok(())
     }
 
+    pub fn search_items(
+        &self,
+        attributes: HashMap<&str, &str>,
+        key: &[u8],
+    ) -> Result<Vec<Item>, Error> {
+        let hashed_search: Vec<(&str, Vec<u8>)> = attributes
+            .into_iter()
+            .map(|(k, v)| {
+                (k, {
+                    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
+                    mac.update(v.as_bytes());
+                    mac.finalize().into_bytes().as_slice().to_vec()
+                })
+            })
+            .collect();
+
+        // TODO: we could make them constant time comparisons
+        self.items
+            .iter()
+            .filter(|e| {
+                hashed_search.iter().all(|(search_key, search_hash)| {
+                    e.hashed_attributes.get(*search_key) == Some(search_hash)
+                })
+            })
+            .map(|e| (*e).clone().decrypt(key))
+            .collect()
+    }
+
     fn as_bytes(&self) -> Result<Vec<u8>, Error> {
         let mut blob = FILE_HEADER.to_vec();
 
@@ -164,7 +193,7 @@ impl TryFrom<&[u8]> for Keyring {
     }
 }
 
-#[derive(Deserialize, Serialize, Type, Debug)]
+#[derive(Deserialize, Serialize, Type, Debug, Clone)]
 pub struct EncryptedItem {
     pub hashed_attributes: HashMap<String, Vec<u8>>,
     pub blob: Vec<u8>,
@@ -191,7 +220,31 @@ impl EncryptedItem {
             .decrypt_padded_mut::<Pkcs7>(&mut data)
             .unwrap();
 
-        Item::try_from(decrypted)
+        let item = Item::try_from(decrypted)?;
+
+        Self::validate(&self.hashed_attributes, &item, key)?;
+
+        Ok(item)
+    }
+
+    fn validate(
+        hashed_attributes: &HashMap<String, Vec<u8>>,
+        item: &Item,
+        key: &[u8],
+    ) -> Result<(), Error> {
+        for (attribute_key, hashed_attribute) in hashed_attributes.iter() {
+            if let Some(attribute_plaintext) = item.attributes.get(attribute_key) {
+                let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
+                mac.update(attribute_plaintext.as_bytes());
+                if mac.verify_slice(hashed_attribute).is_err() {
+                    return Err(Error::HashedAttributeMac(attribute_key.to_string()));
+                }
+            } else {
+                return Err(Error::HashedAttributeMac(attribute_key.to_string()));
+            }
+        }
+
+        Ok(())
     }
 }
 

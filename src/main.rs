@@ -20,15 +20,25 @@ async fn decrypt_new() -> Result<(), keyring::Error> {
 
     let key = keyring.derive_key(&secret);
 
-    for item_encrypted in keyring.items {
-        let item = item_encrypted.decrypt(&key).unwrap();
+    for item_encrypted in &keyring.items {
+        let item = item_encrypted.clone().decrypt(&key).unwrap();
         dbg!(&item);
         let item_encrypted_2 = item.encrypt(&key).unwrap();
         let item2 = item_encrypted_2.decrypt(&key).unwrap();
         dbg!(&item2);
     }
 
-    keyring::Keyring::new().dump("/tmp/test.keyring").await.unwrap();
+    dbg!(keyring
+        .search_items(HashMap::from([("tag-name", "some-value")]), &key)
+        .unwrap());
+    dbg!(keyring
+        .search_items(HashMap::from([("tag-namex", "some-value")]), &key)
+        .unwrap());
+
+    keyring::Keyring::new()
+        .dump("/tmp/test.keyring")
+        .await
+        .unwrap();
     keyring::Keyring::load("/tmp/test.keyring").await.unwrap();
 
     Ok(())
