@@ -2,24 +2,20 @@ use async_std::prelude::*;
 
 use async_std::path::Path;
 use cipher::{
-    block_padding::Pkcs7, crypto_common::rand_core, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
+    block_padding::Pkcs7, crypto_common::rand_core, BlockDecryptMut, BlockEncryptMut,
+    BlockSizeUser, IvSizeUser, KeyIvInit,
 };
+use digest::OutputSizeUser;
 use hmac::Mac;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use zeroize::{Zeroize, Zeroizing};
 use zvariant::Type;
 
-//const SALT_SIZE: usize = 32;
-//const ITERATION_COUNT: usize = 100000;
-
-//const MAC_ALGO = GCRY_MAC_HMAC_SHA256;
-const MAC_SIZE: usize = 32;
-
-//const CIPHER_ALGO = GCRY_CIPHER_AES256;
-const CIPHER_BLOCK_SIZE: usize = 16;
-const IV_SIZE: usize = CIPHER_BLOCK_SIZE;
+const SALT_SIZE: usize = 32;
+const ITERATION_COUNT: u32 = 100000;
 
 const FILE_HEADER: &[u8] = b"GnomeKeyring\n\r\0\n";
 const FILE_HEADER_LEN: usize = FILE_HEADER.len();
@@ -32,6 +28,7 @@ pub enum Error {
     FileHeaderMismatch(Option<String>),
     VersionMismatch(Option<Vec<u8>>),
     NoData,
+    NoParentDir(String),
     GVariantDeserialization(zvariant::Error),
     Io(std::io::Error),
     MacError,
@@ -67,6 +64,20 @@ pub struct Keyring {
 }
 
 impl Keyring {
+    pub fn new() -> Self {
+        let salt = rand::thread_rng().gen::<[u8; SALT_SIZE]>().to_vec();
+
+        Self {
+            salt_size: salt.len() as u32,
+            salt,
+            iteration_count: ITERATION_COUNT,
+            // TODO: UTC?
+            modified_time: 0,
+            usage_count: 0,
+            items: Vec::new(),
+        }
+    }
+
     pub async fn load_default() -> Result<Self, Error> {
         Self::load(&Self::default_path()).await
     }
@@ -78,8 +89,32 @@ impl Keyring {
     }
 
     /// Write to a keyring file
-    pub async fn dump<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
-        todo!()
+    pub async fn dump<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
+        let mut tmpfile = if let Some(parent) = path.as_ref().parent() {
+            Ok(tempfile::NamedTempFile::new_in(parent)?)
+        } else {
+            Err(Error::NoParentDir(path.as_ref().display().to_string()))
+        }?;
+
+        let blob: Vec<u8> = self.as_bytes()?;
+
+        use std::io::Write;
+        // TODO: this is currently blocking
+        // We need a solution for race conditions
+        tmpfile.write_all(&blob)?;
+        tmpfile.persist(path.as_ref()).unwrap();
+
+        Ok(())
+    }
+
+    fn as_bytes(&self) -> Result<Vec<u8>, Error> {
+        let mut blob = FILE_HEADER.to_vec();
+
+        blob.push(MAJOR_VERSION);
+        blob.push(MINOR_VERSION);
+        blob.append(&mut zvariant::to_bytes(gvariant_encoding(), &self)?);
+
+        Ok(blob)
     }
 
     // TODO: This adds glib dependency
@@ -92,7 +127,7 @@ impl Keyring {
     }
 
     pub fn derive_key(&self, secret: &[u8]) -> Zeroizing<Vec<u8>> {
-        let mut key = Zeroizing::new(vec![0; CIPHER_BLOCK_SIZE]);
+        let mut key = Zeroizing::new(vec![0; dbg!(cbc::Encryptor::<aes::Aes128>::block_size())]);
 
         pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(
             secret,
@@ -137,14 +172,18 @@ pub struct EncryptedItem {
 
 impl EncryptedItem {
     pub fn decrypt(mut self, key: &[u8]) -> Result<Item, Error> {
-        let mac_tag = self.blob.split_off(self.blob.len() - MAC_SIZE);
+        let mac_tag = self
+            .blob
+            .split_off(self.blob.len() - hmac::HmacCore::<sha2::Sha256>::output_size());
 
         // verify item
         let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
         mac.update(&self.blob);
         mac.verify_slice(&mac_tag)?;
 
-        let iv = self.blob.split_off(self.blob.len() - IV_SIZE);
+        let iv = self
+            .blob
+            .split_off(self.blob.len() - cbc::Decryptor::<aes::Aes128>::iv_size());
         let mut data = Zeroizing::new(self.blob);
 
         // decrypt item
@@ -173,7 +212,7 @@ impl Item {
 
         let iv = cbc::Encryptor::<aes::Aes128>::generate_iv(rand_core::OsRng);
 
-        let mut blob = vec![0; decrypted.len() + CIPHER_BLOCK_SIZE];
+        let mut blob = vec![0; decrypted.len() + cbc::Encryptor::<aes::Aes128>::block_size()];
 
         // Unwrapping since adding `CIPHER_BLOCK_SIZE` to array is enough space for PKCS7
         let encrypted_len = cbc::Encryptor::<aes::Aes128>::new(key.into(), &iv)

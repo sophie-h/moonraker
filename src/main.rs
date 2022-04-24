@@ -28,6 +28,9 @@ async fn decrypt_new() -> Result<(), keyring::Error> {
         dbg!(&item2);
     }
 
+    keyring::Keyring::new().dump("/tmp/test.keyring").await.unwrap();
+    keyring::Keyring::load("/tmp/test.keyring").await.unwrap();
+
     Ok(())
 }
 
