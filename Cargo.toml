@@ -1,0 +1,21 @@
+[package]
+name = "moonraker"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libsecret = "0.1"
+glib = "0.15"
+gio = "0.15"
+openssl = { version= "0.10",  features = ["vendored"]}
+ashpd = { version = "0.3", git="https://github.com/bilelmoussaoui/ashpd.git"}
+zbus = "2.1"
+async-std = "*"
+tracing-subscriber = "*"
+gcrypt = "*"
+serde = "*"
+zvariant = "*"
+byteorder = "*"
+zeroize = "*"
