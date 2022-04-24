@@ -1,15 +1,14 @@
 use async_std::prelude::*;
 
 use async_std::path::Path;
+use cbc::cipher::BlockDecryptMut;
+use cbc::cipher::{block_padding::Pkcs7, KeyIvInit};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 use zvariant::Type;
 
-fn pbkdf2_hash_algo() -> openssl::hash::MessageDigest {
-    openssl::hash::MessageDigest::sha256()
-}
 //const SALT_SIZE: usize = 32;
 //const ITERATION_COUNT: usize = 100000;
 
@@ -77,18 +76,16 @@ impl Keyring {
     }
 
     pub fn derive_key(&self, secret: &[u8]) -> Zeroizing<Vec<u8>> {
-        let mut key = vec![0; CIPHER_BLOCK_SIZE];
+        let mut key = Zeroizing::new(vec![0; CIPHER_BLOCK_SIZE]);
 
-        openssl::pkcs5::pbkdf2_hmac(
+        pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(
             secret,
             &self.salt,
-            self.iteration_count as usize,
-            pbkdf2_hash_algo(),
+            self.iteration_count,
             &mut key,
-        )
-        .unwrap();
+        );
 
-        Zeroizing::new(key)
+        key
     }
 }
 
@@ -126,29 +123,20 @@ impl ItemEncrypted {
     pub fn decrypt(mut self, key: &[u8]) -> Result<Item, Error> {
         let _mac = self.blob.split_off(self.blob.len() - MAC_SIZE);
         let iv = self.blob.split_off(self.blob.len() - IV_SIZE);
-        let data = self.blob;
+        let mut data = Zeroizing::new(self.blob);
 
-        let mut cipher = gcrypt::cipher::Cipher::new(
-            gcrypt::cipher::Algorithm::Aes128,
-            gcrypt::cipher::Mode::Cbc,
-        )
-        .unwrap();
+        let decrypted = cbc::Decryptor::<aes::Aes128>::new(key.into(), iv.as_slice().into())
+            .decrypt_padded_mut::<Pkcs7>(&mut data)
+            .unwrap();
 
-        cipher.set_iv(&iv).unwrap();
-        cipher.set_key(&key).unwrap();
-
-        let mut secret = vec![0; data.len()];
-
-        cipher.decrypt(&data, &mut secret).unwrap();
-
-        let real_length = dbg!(secret.len()) - dbg!(*secret.last().unwrap() as usize);
-
-        Item::try_from(&secret[..real_length])
+        Item::try_from(decrypted)
     }
 }
 
-#[derive(Deserialize, Serialize, Type, Debug)]
+#[derive(Deserialize, Serialize, Type, Debug, Zeroize)]
 pub struct Item {
+    // TODO: Ideally zeroize this as well
+    #[zeroize(skip)]
     attributes: HashMap<String, String>,
     label: String,
     created: u64,

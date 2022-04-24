@@ -9,13 +9,19 @@ edition = "2021"
 libsecret = "0.1"
 glib = "0.15"
 gio = "0.15"
-openssl = { version= "0.10",  features = ["vendored"]}
 ashpd = { version = "0.3", git="https://github.com/bilelmoussaoui/ashpd.git"}
 zbus = "2.1"
 async-std = "*"
-tracing-subscriber = "*"
-gcrypt = "*"
 serde = "*"
 zvariant = "*"
 byteorder = "*"
-zeroize = "*"
+
+pbkdf2 = "0.11"
+cbc = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+aes = "0.8"
+
+[dependencies.zeroize]
+version = "*"
+features = ["zeroize_derive"]

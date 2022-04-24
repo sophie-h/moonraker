@@ -3,7 +3,6 @@ mod keyring;
 use std::collections::HashMap;
 
 fn main() {
-    tracing_subscriber::fmt::init();
     println!("Hello, world!");
     //x();
     async_std::task::block_on(decrypt_new()).unwrap();
