@@ -22,9 +22,12 @@ sha2 = "0.10"
 aes = "0.8"
 digest = "0.10"
 
+[dependencies.cipher]
+version = "*"
+features = ["rand_core"]
+
 [dependencies.cbc]
 version = "0.1"
-featrues = ["zeroize", "block-padding"]
 
 [dependencies.zeroize]
 version = "*"

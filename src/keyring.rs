@@ -1,7 +1,9 @@
 use async_std::prelude::*;
 
 use async_std::path::Path;
-use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cipher::{
+    block_padding::Pkcs7, crypto_common::rand_core, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
+};
 use hmac::Mac;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -101,8 +103,6 @@ impl Keyring {
 
         key
     }
-
-
 }
 
 impl TryFrom<&[u8]> for Keyring {
@@ -169,19 +169,22 @@ pub struct Item {
 
 impl Item {
     pub fn encrypt(self, key: &[u8]) -> Result<EncryptedItem, Error> {
-        let  decrypted = Zeroizing::new(zvariant::to_bytes(gvariant_encoding(), &self)?);
+        let decrypted = Zeroizing::new(zvariant::to_bytes(gvariant_encoding(), &self)?);
 
-        let mut iv = vec![0; 16];
+        let iv = cbc::Encryptor::<aes::Aes128>::generate_iv(rand_core::OsRng);
 
         let mut blob = vec![0; decrypted.len() + CIPHER_BLOCK_SIZE];
 
-        let encrypted_len = cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.as_slice().into())
+        // Unwrapping since adding `CIPHER_BLOCK_SIZE` to array is enough space for PKCS7
+        let encrypted_len = cbc::Encryptor::<aes::Aes128>::new(key.into(), &iv)
             .encrypt_padded_b2b_mut::<Pkcs7>(&decrypted, &mut blob)
-            .unwrap().len();
+            .unwrap()
+            .len();
 
         blob.truncate(encrypted_len);
-        blob.append(&mut iv);
+        blob.append(&mut iv.as_slice().into());
 
+        // Unwrapping since arbitrary keylength allowed
         let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
         mac.update(&blob);
         blob.append(&mut mac.finalize().into_bytes().as_slice().into());
