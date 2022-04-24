@@ -21,8 +21,11 @@ async fn decrypt_new() -> Result<(), keyring::Error> {
     let key = keyring.derive_key(&secret);
 
     for item_encrypted in keyring.items {
-        let item = item_encrypted.decrypt(&key);
-        dbg!(item.unwrap());
+        let item = item_encrypted.decrypt(&key).unwrap();
+        dbg!(&item);
+        let item_encrypted_2 = item.encrypt(&key).unwrap();
+        let item2 = item_encrypted_2.decrypt(&key).unwrap();
+        dbg!(&item2);
     }
 
     Ok(())

@@ -1,7 +1,7 @@
 use async_std::prelude::*;
 
 use async_std::path::Path;
-use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use hmac::Mac;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,14 +53,15 @@ impl From<digest::MacError> for Error {
     }
 }
 
+/// Logical contents of a keyring file
 #[derive(Deserialize, Serialize, Type, Debug)]
 pub struct Keyring {
-    pub salt_size: u32,
-    pub salt: Vec<u8>,
+    salt_size: u32,
+    salt: Vec<u8>,
     pub iteration_count: u32,
     pub modified_time: u64,
     pub usage_count: u32,
-    pub items: Vec<ItemEncrypted>,
+    pub items: Vec<EncryptedItem>,
 }
 
 impl Keyring {
@@ -68,9 +69,15 @@ impl Keyring {
         Self::load(&Self::default_path()).await
     }
 
+    /// Load from a keyring file
     pub async fn load<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
         let content = async_std::fs::read(path).await?;
         Self::try_from(content.as_slice())
+    }
+
+    /// Write to a keyring file
+    pub async fn dump<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+        todo!()
     }
 
     // TODO: This adds glib dependency
@@ -94,6 +101,8 @@ impl Keyring {
 
         key
     }
+
+
 }
 
 impl TryFrom<&[u8]> for Keyring {
@@ -121,12 +130,12 @@ impl TryFrom<&[u8]> for Keyring {
 }
 
 #[derive(Deserialize, Serialize, Type, Debug)]
-pub struct ItemEncrypted {
+pub struct EncryptedItem {
     pub hashed_attributes: HashMap<String, Vec<u8>>,
     pub blob: Vec<u8>,
 }
 
-impl ItemEncrypted {
+impl EncryptedItem {
     pub fn decrypt(mut self, key: &[u8]) -> Result<Item, Error> {
         let mac_tag = self.blob.split_off(self.blob.len() - MAC_SIZE);
 
@@ -149,13 +158,42 @@ impl ItemEncrypted {
 
 #[derive(Deserialize, Serialize, Type, Debug, Zeroize)]
 pub struct Item {
-    // TODO: Ideally zeroize this as well
+    // TODO: Zeroize the values
     #[zeroize(skip)]
     attributes: HashMap<String, String>,
     label: String,
     created: u64,
     modified: u64,
     password: Vec<u8>,
+}
+
+impl Item {
+    pub fn encrypt(self, key: &[u8]) -> Result<EncryptedItem, Error> {
+        let  decrypted = Zeroizing::new(zvariant::to_bytes(gvariant_encoding(), &self)?);
+
+        let mut iv = vec![0; 16];
+
+        let mut blob = vec![0; decrypted.len() + CIPHER_BLOCK_SIZE];
+
+        let encrypted_len = cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.as_slice().into())
+            .encrypt_padded_b2b_mut::<Pkcs7>(&decrypted, &mut blob)
+            .unwrap().len();
+
+        blob.truncate(encrypted_len);
+        blob.append(&mut iv);
+
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
+        mac.update(&blob);
+        blob.append(&mut mac.finalize().into_bytes().as_slice().into());
+
+        // TODO: write hashed attributes
+        let hashed_attributes = Default::default();
+
+        Ok(EncryptedItem {
+            hashed_attributes,
+            blob,
+        })
+    }
 }
 
 impl TryFrom<&[u8]> for Item {
