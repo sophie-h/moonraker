@@ -1,8 +1,8 @@
 use async_std::prelude::*;
 
 use async_std::path::Path;
-use cbc::cipher::BlockDecryptMut;
-use cbc::cipher::{block_padding::Pkcs7, KeyIvInit};
+use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use hmac::Mac;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -19,8 +19,8 @@ const MAC_SIZE: usize = 32;
 const CIPHER_BLOCK_SIZE: usize = 16;
 const IV_SIZE: usize = CIPHER_BLOCK_SIZE;
 
-const KEYRING_FILE_HEADER: &[u8] = b"GnomeKeyring\n\r\0\n";
-const KEYRING_FILE_HEADER_LEN: usize = KEYRING_FILE_HEADER.len();
+const FILE_HEADER: &[u8] = b"GnomeKeyring\n\r\0\n";
+const FILE_HEADER_LEN: usize = FILE_HEADER.len();
 
 const MAJOR_VERSION: u8 = 1;
 const MINOR_VERSION: u8 = 0;
@@ -32,6 +32,7 @@ pub enum Error {
     NoData,
     GVariantDeserialization(zvariant::Error),
     Io(std::io::Error),
+    MacError,
 }
 
 impl From<zvariant::Error> for Error {
@@ -43,6 +44,12 @@ impl From<zvariant::Error> for Error {
 impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<digest::MacError> for Error {
+    fn from(_value: digest::MacError) -> Self {
+        Self::MacError
     }
 }
 
@@ -93,19 +100,19 @@ impl TryFrom<&[u8]> for Keyring {
     type Error = Error;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
-        let header = value.get(..KEYRING_FILE_HEADER.len());
-        if header != Some(KEYRING_FILE_HEADER) {
+        let header = value.get(..FILE_HEADER.len());
+        if header != Some(FILE_HEADER) {
             return Err(Error::FileHeaderMismatch(
                 header.map(|x| String::from_utf8_lossy(x).to_string()),
             ));
         }
 
-        let version = value.get(KEYRING_FILE_HEADER_LEN..(KEYRING_FILE_HEADER_LEN + 2));
+        let version = value.get(FILE_HEADER_LEN..(FILE_HEADER_LEN + 2));
         if version != Some(&[MAJOR_VERSION, MINOR_VERSION]) {
             return Err(Error::VersionMismatch(version.map(|x| x.to_vec())));
         }
 
-        if let Some(data) = value.get((KEYRING_FILE_HEADER_LEN + 2)..) {
+        if let Some(data) = value.get((FILE_HEADER_LEN + 2)..) {
             Ok(zvariant::from_slice(data, gvariant_encoding())?)
         } else {
             Err(Error::NoData)
@@ -115,16 +122,23 @@ impl TryFrom<&[u8]> for Keyring {
 
 #[derive(Deserialize, Serialize, Type, Debug)]
 pub struct ItemEncrypted {
-    pub attributes_hashed: HashMap<String, Vec<u8>>,
+    pub hashed_attributes: HashMap<String, Vec<u8>>,
     pub blob: Vec<u8>,
 }
 
 impl ItemEncrypted {
     pub fn decrypt(mut self, key: &[u8]) -> Result<Item, Error> {
-        let _mac = self.blob.split_off(self.blob.len() - MAC_SIZE);
+        let mac_tag = self.blob.split_off(self.blob.len() - MAC_SIZE);
+
+        // verify item
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
+        mac.update(&self.blob);
+        mac.verify_slice(&mac_tag)?;
+
         let iv = self.blob.split_off(self.blob.len() - IV_SIZE);
         let mut data = Zeroizing::new(self.blob);
 
+        // decrypt item
         let decrypted = cbc::Decryptor::<aes::Aes128>::new(key.into(), iv.as_slice().into())
             .decrypt_padded_mut::<Pkcs7>(&mut data)
             .unwrap();
