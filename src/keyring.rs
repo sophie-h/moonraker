@@ -27,6 +27,7 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Load from default keyring file
     pub async fn load_default() -> Result<Self> {
         // TODO: use secret api here
         let secret = vec![1, 2];

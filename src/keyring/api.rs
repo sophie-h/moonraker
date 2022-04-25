@@ -119,7 +119,6 @@ impl Keyring {
         path: P,
         mtime: Option<std::time::SystemTime>,
     ) -> Result<()> {
-        // TODO: create parent dir if not exists
         let tmp_path = if let Some(parent) = path.as_ref().parent() {
             let rnd: String = rand::thread_rng()
                 .sample_iter(&rand::distributions::Alphanumeric)
@@ -133,7 +132,6 @@ impl Keyring {
             if !parent.exists().await {
                 fs::DirBuilder::new()
                     .recursive(true)
-                    //.mode(0o700)
                     .create(parent)
                     .await?;
             }
@@ -143,7 +141,15 @@ impl Keyring {
             Err(Error::NoParentDir(path.as_ref().display().to_string()))
         }?;
 
-        let mut tmpfile = fs::File::create(&tmp_path).await?;
+        let mut tmpfile_builder = fs::OpenOptions::new();
+
+        tmpfile_builder.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            tmpfile_builder.mode(0o600);
+        }
+        let mut tmpfile = tmpfile_builder.open(&tmp_path).await?;
 
         let blob: Vec<u8> = self.as_bytes()?;
 
