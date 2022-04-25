@@ -1,5 +1,3 @@
-use async_std::prelude::*;
-
 use async_std::path::Path;
 use cipher::{
     block_padding::Pkcs7, crypto_common::rand_core, BlockDecryptMut, BlockEncryptMut,
@@ -69,6 +67,7 @@ pub struct Keyring {
 }
 
 impl Keyring {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let salt = rand::thread_rng().gen::<[u8; SALT_SIZE]>().to_vec();
 
@@ -337,7 +336,8 @@ pub fn gvariant_encoding() -> zvariant::EncodingContext<byteorder::LE> {
     zvariant::EncodingContext::<byteorder::LE>::new_gvariant(0)
 }
 
-// TODO: Do we actually want to pull ashpd as depencdency?
+// TODO: use our implementation
+/*
 async fn secret() -> Result<Vec<u8>, ashpd::Error> {
     let connection = zbus::Connection::session().await?;
     let proxy = ashpd::desktop::secret::SecretProxy::new(&connection).await?;
@@ -353,3 +353,4 @@ async fn secret() -> Result<Vec<u8>, ashpd::Error> {
 
     Ok(buf)
 }
+*/

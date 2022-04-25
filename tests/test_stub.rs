@@ -1,14 +1,16 @@
-mod keyring;
+use moonraker::keyring;
 
 use std::collections::HashMap;
 
+/*
 fn main() {
     println!("Hello, world!");
     //x();
     async_std::task::block_on(decrypt_new()).unwrap();
 }
+*/
 
-async fn decrypt_new() -> Result<(), keyring::Error> {
+async fn get_key() -> Result<zeroize::Zeroizing<Vec<u8>>, keyring::Error> {
     let keyring = keyring::Keyring::load_default().await?;
 
     let secret = [
@@ -18,7 +20,14 @@ async fn decrypt_new() -> Result<(), keyring::Error> {
         48, 159, 0, 146,
     ];
 
-    let key = keyring.derive_key(&secret);
+    Ok(keyring.derive_key(&secret))
+}
+
+#[async_std::test]
+async fn test_collection() -> Result<(), keyring::Error> {
+    let key = get_key().await?;
+
+    let keyring = keyring::Keyring::load_default().await?;
 
     for item_encrypted in &keyring.items {
         let item = item_encrypted.clone().decrypt(&key).unwrap();
@@ -34,6 +43,13 @@ async fn decrypt_new() -> Result<(), keyring::Error> {
     dbg!(keyring
         .search_items(HashMap::from([("tag-namex", "some-value")]), &key)
         .unwrap());
+
+    Ok(())
+}
+
+#[async_std::test]
+async fn test_dump_load() {
+    let key = get_key().await.unwrap();
 
     let mut new_keyring = keyring::Keyring::new();
     new_keyring.items.push(
@@ -53,10 +69,9 @@ async fn decrypt_new() -> Result<(), keyring::Error> {
         .unwrap();
 
     assert_eq!(loaded_items[0].password, "A Password".as_bytes());
-
-    Ok(())
 }
 
+/*
 fn x() {
     libsecret::password_store_sync(
         Some(&my_schema()),
@@ -76,3 +91,4 @@ fn my_schema() -> libsecret::Schema {
         HashMap::from([("tag-name", libsecret::SchemaAttributeType::String)]),
     )
 }
+*/

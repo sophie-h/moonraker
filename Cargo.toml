@@ -3,26 +3,26 @@ name = "moonraker"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-libsecret = "0.1"
 glib = "0.15"
-gio = "0.15"
-ashpd = { version = "0.3", git="https://github.com/bilelmoussaoui/ashpd.git"}
-zbus = "2.1"
-async-std = "*"
-serde = "*"
-zvariant = "*"
-byteorder = "*"
 
-pbkdf2 = "0.11"
-hmac = "0.12"
-sha2 = "0.10"
+byteorder = "*"
+serde = "*"
+#zbus = "2.1"
+zvariant = "*"
+
 aes = "0.8"
 digest = "0.10"
+hmac = "0.12"
+pbkdf2 = "0.11"
 rand = "*"
+sha2 = "0.10"
+
 tempfile = "3.3"
+
+[dependencies.async-std ]
+version = "*"
+features = ["attributes"]
 
 [dependencies.cipher]
 version = "*"
@@ -34,3 +34,7 @@ version = "0.1"
 [dependencies.zeroize]
 version = "*"
 features = ["zeroize_derive"]
+
+[dev-dependencies]
+libsecret = "0.1"
+gio = "0.15"
