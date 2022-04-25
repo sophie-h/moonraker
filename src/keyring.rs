@@ -1,6 +1,28 @@
 /*!
 Keyring
 
+```
+# std::env::set_var("XDG_DATA_HOME", "/tmp/doctest");
+# use moonraker::keyring::{self, Error};
+# use std::collections::HashMap;
+# async_std::task::block_on(async {
+#
+keyring::insert_replace(&keyring::Item::new(
+    "My Label",
+    HashMap::from([("account", "alice")]),
+    b"My Password",
+))
+.await?;
+
+let items = keyring::lookup(HashMap::from([("account", "alice")])).await?;
+assert_eq!(*items[0].password(), b"My Password");
+
+keyring::remove(HashMap::from([("account", "alice")])).await?;
+#
+# Ok::<(), Error>(())
+# }).unwrap()
+```
+
 */
 
 pub mod api;
@@ -12,11 +34,25 @@ use async_std::path::{Path, PathBuf};
 use async_std::{fs, io};
 use std::collections::HashMap;
 
-pub async fn lookup(attributes: HashMap<&str, &str>) -> Result<Vec<Item>> {
+pub async fn insert_replace(item: &Item) -> Result<()> {
+    let mut storage = Storage::load_default().await?;
+    storage
+        .keyring
+        .remove_items(item.attributes().clone(), &storage.key)?;
+    storage.keyring.items.push(item.encrypt(&storage.key)?);
+    storage.write().await
+}
+
+pub async fn lookup(attributes: HashMap<impl AsRef<str>, impl AsRef<str>>) -> Result<Vec<Item>> {
     let storage = Storage::load_default().await?;
     storage.keyring.search_items(attributes, &storage.key)
 }
 
+pub async fn remove(attributes: HashMap<impl AsRef<str>, impl AsRef<str>>) -> Result<()> {
+    let mut storage = Storage::load_default().await?;
+    storage.keyring.remove_items(attributes, &storage.key)?;
+    storage.write().await
+}
 pub struct Storage {
     keyring: api::Keyring,
     path: PathBuf,

@@ -14,9 +14,29 @@ async fn get_key() -> Result<keyring::api::Key, keyring::Error> {
 
     Ok(keyring.derive_key(&secret))
 }
+#[async_std::test]
+async fn keyfile_add_remove() -> keyring::api::Result<()> {
+    let key = get_key().await?;
+
+    let needle = HashMap::from([(String::from("key"), String::from("value"))]);
+
+    let mut keyring = keyring::api::Keyring::new();
+
+    keyring.items.push(
+        keyring::Item::new(String::from("Label"), needle.clone(), b"MyPassword").encrypt(&key)?,
+    );
+
+    assert_eq!(keyring.search_items(needle.clone(), &key)?.len(), 1);
+
+    keyring.remove_items(needle.clone(), &key)?;
+
+    assert_eq!(keyring.search_items(needle, &key)?.len(), 0);
+
+    Ok(())
+}
 
 #[async_std::test]
-async fn test_dump_load() {
+async fn keyfile_dump_load() {
     let key = get_key().await.unwrap();
 
     let _silent = std::fs::remove_file("/tmp/test.keyring");

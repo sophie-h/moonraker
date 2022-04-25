@@ -5,8 +5,6 @@ Only use this if you know what you are doing.
 
 ### TODO
 
-- Generalize attribute hashing
-- Delete and overwrite intems
 - Order user calls
 - Keep proxis around
 - Make more things async
@@ -122,7 +120,7 @@ impl Keyring {
         let tmp_path = if let Some(parent) = path.as_ref().parent() {
             let rnd: String = rand::thread_rng()
                 .sample_iter(&rand::distributions::Alphanumeric)
-                .take(7)
+                .take(16)
                 .map(char::from)
                 .collect();
 
@@ -130,10 +128,7 @@ impl Keyring {
             tmp_path.push(format!(".tmpkeyring{}", rnd));
 
             if !parent.exists().await {
-                fs::DirBuilder::new()
-                    .recursive(true)
-                    .create(parent)
-                    .await?;
+                fs::DirBuilder::new().recursive(true).create(parent).await?;
             }
 
             Ok(tmp_path)
@@ -151,7 +146,7 @@ impl Keyring {
         }
         let mut tmpfile = tmpfile_builder.open(&tmp_path).await?;
 
-        let blob: Vec<u8> = self.as_bytes()?;
+        let blob = self.as_bytes()?;
 
         tmpfile.write_all(&blob).await?;
         tmpfile.sync_all().await?;
@@ -175,30 +170,46 @@ impl Keyring {
         Ok(())
     }
 
-    pub fn search_items(&self, attributes: HashMap<&str, &str>, key: &Key) -> Result<Vec<Item>> {
-        let hashed_search: Vec<(&str, _)> = attributes
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    k,
-                    AttributeValue::from(v)
-                        .mac(key)
-                        .into_bytes()
-                        .as_slice()
-                        .to_vec(),
-                )
-            })
-            .collect();
+    pub fn search_items(
+        &self,
+        attributes: HashMap<impl AsRef<str>, impl AsRef<str>>,
+        key: &Key,
+    ) -> Result<Vec<Item>> {
+        let hashed_search = hash_attributes(attributes, key);
 
         self.items
             .iter()
             .filter(|e| {
                 hashed_search.iter().all(|(search_key, search_hash)| {
-                    e.hashed_attributes.get(*search_key) == Some(search_hash)
+                    e.hashed_attributes.get(search_key.as_ref()) == Some(search_hash)
                 })
             })
             .map(|e| (*e).clone().decrypt(key))
             .collect()
+    }
+
+    pub fn remove_items(
+        &mut self,
+        attributes: HashMap<impl AsRef<str>, impl AsRef<str>>,
+        key: &Key,
+    ) -> Result<()> {
+        let hashed_search = hash_attributes(attributes, key);
+
+        let (remove, keep): (Vec<EncryptedItem>, _) =
+            self.items.clone().into_iter().partition(|e| {
+                hashed_search.iter().all(|(search_key, search_hash)| {
+                    e.hashed_attributes.get(search_key.as_ref()) == Some(search_hash)
+                })
+            });
+
+        // check hashes for the ones to be removed
+        for item in remove {
+            item.decrypt(key)?;
+        }
+
+        self.items = keep;
+
+        Ok(())
     }
 
     fn as_bytes(&self) -> Result<Vec<u8>> {
@@ -211,7 +222,6 @@ impl Keyring {
         Ok(blob)
     }
 
-    // TODO: This adds glib dependency
     pub fn default_path() -> Result<PathBuf> {
         if let Some(mut path) = dirs::data_dir() {
             path.push("keyrings");
@@ -342,6 +352,10 @@ impl Item {
         }
     }
 
+    pub fn attributes(&self) -> &HashMap<String, AttributeValue> {
+        &self.attributes
+    }
+
     pub fn label(&self) -> &str {
         &self.label
     }
@@ -360,7 +374,7 @@ impl Item {
         self.password = password.as_ref().to_vec();
     }
 
-    pub fn encrypt(self, key: &Key) -> Result<EncryptedItem> {
+    pub fn encrypt(&self, key: &Key) -> Result<EncryptedItem> {
         let decrypted = Zeroizing::new(zvariant::to_bytes(gvariant_encoding(), &self)?);
 
         let iv = EncAlg::generate_iv(rand_core::OsRng);
@@ -402,8 +416,16 @@ impl TryFrom<&[u8]> for Item {
     }
 }
 
-#[derive(Deserialize, Serialize, Type, Debug, Zeroize, ZeroizeOnDrop)]
+#[derive(Deserialize, Serialize, Type, Clone, Debug, Zeroize, ZeroizeOnDrop)]
 pub struct AttributeValue(String);
+
+impl AttributeValue {
+    pub fn mac(&self, key: &Key) -> digest::CtOutput<MacAlg> {
+        let mut mac = MacAlg::new_from_slice(key.as_ref()).unwrap();
+        mac.update(self.0.as_bytes());
+        mac.finalize()
+    }
+}
 
 impl<S: ToString> From<S> for AttributeValue {
     fn from(value: S) -> Self {
@@ -411,18 +433,16 @@ impl<S: ToString> From<S> for AttributeValue {
     }
 }
 
-impl std::ops::Deref for AttributeValue {
-    type Target = str;
-    fn deref(&self) -> &Self::Target {
+impl AsRef<str> for AttributeValue {
+    fn as_ref(&self) -> &str {
         self.0.as_str()
     }
 }
 
-impl AttributeValue {
-    pub fn mac(&self, key: &Key) -> digest::CtOutput<MacAlg> {
-        let mut mac = MacAlg::new_from_slice(key.as_ref()).unwrap();
-        mac.update(self.0.as_bytes());
-        mac.finalize()
+impl std::ops::Deref for AttributeValue {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
     }
 }
 
@@ -440,6 +460,25 @@ impl AsMut<[u8]> for Key {
     fn as_mut(&mut self) -> &mut [u8] {
         &mut self.0
     }
+}
+
+pub fn hash_attributes<K: AsRef<str>>(
+    attributes: HashMap<K, impl AsRef<str>>,
+    key: &Key,
+) -> Vec<(K, Vec<u8>)> {
+    attributes
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k,
+                AttributeValue::from(v.as_ref())
+                    .mac(key)
+                    .into_bytes()
+                    .as_slice()
+                    .to_vec(),
+            )
+        })
+        .collect()
 }
 
 pub fn gvariant_encoding() -> zvariant::EncodingContext<byteorder::LE> {
