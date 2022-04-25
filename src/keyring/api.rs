@@ -45,6 +45,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
+    /// File header does not match `FILE_HEADER`
     FileHeaderMismatch(Option<String>),
     VersionMismatch(Option<Vec<u8>>),
     NoData,
@@ -53,6 +54,8 @@ pub enum Error {
     Io(std::io::Error),
     MacError,
     HashedAttributeMac(String),
+    /// XDG_DATA_HOME required for reading from default location
+    NoDataDir,
 }
 
 impl From<zvariant::Error> for Error {
@@ -101,7 +104,7 @@ impl Keyring {
     }
 
     pub async fn load_default() -> Result<Self> {
-        Self::load(&Self::default_path()).await
+        Self::load(&Self::default_path()?).await
     }
 
     /// Load from a keyring file
@@ -166,12 +169,14 @@ impl Keyring {
     }
 
     // TODO: This adds glib dependency
-    pub fn default_path() -> PathBuf {
-        let mut path = glib::user_data_dir();
-        path.push("keyrings");
-        path.push("default.keyring");
-
-        path
+    pub fn default_path() -> Result<PathBuf> {
+        if let Some(mut path) = dirs::data_dir() {
+            path.push("keyrings");
+            path.push("default.keyring");
+            Ok(path)
+        } else {
+            Err(Error::NoDataDir)
+        }
     }
 
     pub fn derive_key(&self, secret: &[u8]) -> Zeroizing<Vec<u8>> {

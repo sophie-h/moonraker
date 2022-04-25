@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-glib = "0.15"
-
 byteorder = "*"
 serde = "*"
 #zbus = "2.1"
@@ -18,6 +16,7 @@ pbkdf2 = "0.11"
 rand = "*"
 sha2 = "0.10"
 
+dirs = "4.0"
 tempfile = "3.3"
 
 [dependencies.async-std ]
