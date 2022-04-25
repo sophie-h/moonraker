@@ -35,11 +35,24 @@ async fn decrypt_new() -> Result<(), keyring::Error> {
         .search_items(HashMap::from([("tag-namex", "some-value")]), &key)
         .unwrap());
 
-    keyring::Keyring::new()
-        .dump("/tmp/test.keyring")
-        .await
+    let mut new_keyring = keyring::Keyring::new();
+    new_keyring.items.push(
+        keyring::Item::new(
+            String::from("My Label"),
+            HashMap::from([(String::from("my-tag"), String::from("my tag value"))]),
+            "A Password".as_bytes(),
+        )
+        .encrypt(&key)
+        .unwrap(),
+    );
+    new_keyring.dump("/tmp/test.keyring").await.unwrap();
+
+    let loaded_keyring = keyring::Keyring::load("/tmp/test.keyring").await.unwrap();
+    let loaded_items = loaded_keyring
+        .search_items(HashMap::from([("my-tag", "my tag value")]), &key)
         .unwrap();
-    keyring::Keyring::load("/tmp/test.keyring").await.unwrap();
+
+    assert_eq!(loaded_items[0].password, "A Password".as_bytes());
 
     Ok(())
 }

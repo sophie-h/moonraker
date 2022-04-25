@@ -23,6 +23,10 @@ const FILE_HEADER_LEN: usize = FILE_HEADER.len();
 const MAJOR_VERSION: u8 = 1;
 const MINOR_VERSION: u8 = 0;
 
+type MacAlg = hmac::Hmac<sha2::Sha256>;
+type EncAlg = cbc::Encryptor<aes::Aes128>;
+type DecAlg = cbc::Decryptor<aes::Aes128>;
+
 #[derive(Debug)]
 pub enum Error {
     FileHeaderMismatch(Option<String>),
@@ -73,7 +77,10 @@ impl Keyring {
             salt,
             iteration_count: ITERATION_COUNT,
             // TODO: UTC?
-            modified_time: 0,
+            modified_time: std::time::SystemTime::UNIX_EPOCH
+                .elapsed()
+                .unwrap()
+                .as_secs(),
             usage_count: 0,
             items: Vec::new(),
         }
@@ -117,7 +124,7 @@ impl Keyring {
             .into_iter()
             .map(|(k, v)| {
                 (k, {
-                    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
+                    let mut mac = MacAlg::new_from_slice(key).unwrap();
                     mac.update(v.as_bytes());
                     mac.finalize().into_bytes().as_slice().to_vec()
                 })
@@ -152,11 +159,11 @@ impl Keyring {
         path.push("keyrings");
         path.push("default.keyring");
 
-        dbg!(path)
+        path
     }
 
     pub fn derive_key(&self, secret: &[u8]) -> Zeroizing<Vec<u8>> {
-        let mut key = Zeroizing::new(vec![0; dbg!(cbc::Encryptor::<aes::Aes128>::block_size())]);
+        let mut key = Zeroizing::new(vec![0; EncAlg::block_size()]);
 
         pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(
             secret,
@@ -206,17 +213,15 @@ impl EncryptedItem {
             .split_off(self.blob.len() - hmac::HmacCore::<sha2::Sha256>::output_size());
 
         // verify item
-        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
+        let mut mac = MacAlg::new_from_slice(key).unwrap();
         mac.update(&self.blob);
         mac.verify_slice(&mac_tag)?;
 
-        let iv = self
-            .blob
-            .split_off(self.blob.len() - cbc::Decryptor::<aes::Aes128>::iv_size());
+        let iv = self.blob.split_off(self.blob.len() - DecAlg::iv_size());
         let mut data = Zeroizing::new(self.blob);
 
         // decrypt item
-        let decrypted = cbc::Decryptor::<aes::Aes128>::new(key.into(), iv.as_slice().into())
+        let decrypted = DecAlg::new(key.into(), iv.as_slice().into())
             .decrypt_padded_mut::<Pkcs7>(&mut data)
             .unwrap();
 
@@ -234,7 +239,7 @@ impl EncryptedItem {
     ) -> Result<(), Error> {
         for (attribute_key, hashed_attribute) in hashed_attributes.iter() {
             if let Some(attribute_plaintext) = item.attributes.get(attribute_key) {
-                let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
+                let mut mac = MacAlg::new_from_slice(key).unwrap();
                 mac.update(attribute_plaintext.as_bytes());
                 if mac.verify_slice(hashed_attribute).is_err() {
                     return Err(Error::HashedAttributeMac(attribute_key.to_string()));
@@ -256,19 +261,38 @@ pub struct Item {
     label: String,
     created: u64,
     modified: u64,
-    password: Vec<u8>,
+    pub password: Vec<u8>,
 }
 
 impl Item {
+    pub fn new<P: AsRef<[u8]>>(
+        label: String,
+        attributes: HashMap<String, String>,
+        password: P,
+    ) -> Self {
+        let now = std::time::SystemTime::UNIX_EPOCH
+            .elapsed()
+            .unwrap()
+            .as_secs();
+
+        Item {
+            attributes,
+            label,
+            created: now,
+            modified: now,
+            password: password.as_ref().to_vec(),
+        }
+    }
+
     pub fn encrypt(self, key: &[u8]) -> Result<EncryptedItem, Error> {
         let decrypted = Zeroizing::new(zvariant::to_bytes(gvariant_encoding(), &self)?);
 
-        let iv = cbc::Encryptor::<aes::Aes128>::generate_iv(rand_core::OsRng);
+        let iv = EncAlg::generate_iv(rand_core::OsRng);
 
-        let mut blob = vec![0; decrypted.len() + cbc::Encryptor::<aes::Aes128>::block_size()];
+        let mut blob = vec![0; decrypted.len() + EncAlg::block_size()];
 
         // Unwrapping since adding `CIPHER_BLOCK_SIZE` to array is enough space for PKCS7
-        let encrypted_len = cbc::Encryptor::<aes::Aes128>::new(key.into(), &iv)
+        let encrypted_len = EncAlg::new(key.into(), &iv)
             .encrypt_padded_b2b_mut::<Pkcs7>(&decrypted, &mut blob)
             .unwrap()
             .len();
@@ -277,12 +301,22 @@ impl Item {
         blob.append(&mut iv.as_slice().into());
 
         // Unwrapping since arbitrary keylength allowed
-        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).unwrap();
+        let mut mac = MacAlg::new_from_slice(key).unwrap();
         mac.update(&blob);
         blob.append(&mut mac.finalize().into_bytes().as_slice().into());
 
         // TODO: write hashed attributes
-        let hashed_attributes = Default::default();
+        let hashed_attributes = self
+            .attributes
+            .into_iter()
+            .map(|(k, v)| {
+                (k, {
+                    let mut mac = MacAlg::new_from_slice(key).unwrap();
+                    mac.update(v.as_bytes());
+                    mac.finalize().into_bytes().as_slice().to_vec()
+                })
+            })
+            .collect();
 
         Ok(EncryptedItem {
             hashed_attributes,
