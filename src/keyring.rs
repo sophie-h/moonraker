@@ -1,3 +1,17 @@
+/**!
+GNOME Keyring format
+
+### TODO
+
+- Generalize attribute hashing
+- Delete and overwrite intems
+- Add `Key` type
+- Add `AttributeValue` type
+- Add user layer
+- Order user calls
+- Keep proxis around
+- Make more things async
+**/
 use async_std::path::Path;
 use cipher::{
     block_padding::Pkcs7, crypto_common::rand_core, BlockDecryptMut, BlockEncryptMut,
@@ -9,7 +23,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use zvariant::Type;
 
 const SALT_SIZE: usize = 32;
@@ -24,6 +38,8 @@ const MINOR_VERSION: u8 = 0;
 type MacAlg = hmac::Hmac<sha2::Sha256>;
 type EncAlg = cbc::Encryptor<aes::Aes128>;
 type DecAlg = cbc::Decryptor<aes::Aes128>;
+
+type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
@@ -60,8 +76,8 @@ impl From<digest::MacError> for Error {
 pub struct Keyring {
     salt_size: u32,
     salt: Vec<u8>,
-    pub iteration_count: u32,
-    pub modified_time: u64,
+    iteration_count: u32,
+    modified_time: u64,
     pub usage_count: u32,
     pub items: Vec<EncryptedItem>,
 }
@@ -76,27 +92,24 @@ impl Keyring {
             salt,
             iteration_count: ITERATION_COUNT,
             // TODO: UTC?
-            modified_time: std::time::SystemTime::UNIX_EPOCH
-                .elapsed()
-                .unwrap()
-                .as_secs(),
+            modified_time: now(),
             usage_count: 0,
             items: Vec::new(),
         }
     }
 
-    pub async fn load_default() -> Result<Self, Error> {
+    pub async fn load_default() -> Result<Self> {
         Self::load(&Self::default_path()).await
     }
 
     /// Load from a keyring file
-    pub async fn load<P: AsRef<Path>>(path: P) -> Result<Self, Error> {
+    pub async fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = async_std::fs::read(path).await?;
         Self::try_from(content.as_slice())
     }
 
     /// Write to a keyring file
-    pub async fn dump<P: AsRef<Path>>(&self, path: P) -> Result<(), Error> {
+    pub async fn dump<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         let mut tmpfile = if let Some(parent) = path.as_ref().parent() {
             Ok(tempfile::NamedTempFile::new_in(parent)?)
         } else {
@@ -114,23 +127,21 @@ impl Keyring {
         Ok(())
     }
 
-    pub fn search_items(
-        &self,
-        attributes: HashMap<&str, &str>,
-        key: &[u8],
-    ) -> Result<Vec<Item>, Error> {
-        let hashed_search: Vec<(&str, Vec<u8>)> = attributes
+    pub fn search_items(&self, attributes: HashMap<&str, &str>, key: &[u8]) -> Result<Vec<Item>> {
+        let hashed_search: Vec<(&str, _)> = attributes
             .into_iter()
             .map(|(k, v)| {
-                (k, {
-                    let mut mac = MacAlg::new_from_slice(key).unwrap();
-                    mac.update(v.as_bytes());
-                    mac.finalize().into_bytes().as_slice().to_vec()
-                })
+                (
+                    k,
+                    AttributeValue::from(v)
+                        .mac(key)
+                        .into_bytes()
+                        .as_slice()
+                        .to_vec(),
+                )
             })
             .collect();
 
-        // TODO: we could make them constant time comparisons
         self.items
             .iter()
             .filter(|e| {
@@ -142,7 +153,7 @@ impl Keyring {
             .collect()
     }
 
-    fn as_bytes(&self) -> Result<Vec<u8>, Error> {
+    fn as_bytes(&self) -> Result<Vec<u8>> {
         let mut blob = FILE_HEADER.to_vec();
 
         blob.push(MAJOR_VERSION);
@@ -178,7 +189,7 @@ impl Keyring {
 impl TryFrom<&[u8]> for Keyring {
     type Error = Error;
 
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+    fn try_from(value: &[u8]) -> Result<Self> {
         let header = value.get(..FILE_HEADER.len());
         if header != Some(FILE_HEADER) {
             return Err(Error::FileHeaderMismatch(
@@ -206,10 +217,8 @@ pub struct EncryptedItem {
 }
 
 impl EncryptedItem {
-    pub fn decrypt(mut self, key: &[u8]) -> Result<Item, Error> {
-        let mac_tag = self
-            .blob
-            .split_off(self.blob.len() - hmac::HmacCore::<sha2::Sha256>::output_size());
+    pub fn decrypt(mut self, key: &[u8]) -> Result<Item> {
+        let mac_tag = self.blob.split_off(self.blob.len() - MacAlg::output_size());
 
         // verify item
         let mut mac = MacAlg::new_from_slice(key).unwrap();
@@ -235,7 +244,7 @@ impl EncryptedItem {
         hashed_attributes: &HashMap<String, Vec<u8>>,
         item: &Item,
         key: &[u8],
-    ) -> Result<(), Error> {
+    ) -> Result<()> {
         for (attribute_key, hashed_attribute) in hashed_attributes.iter() {
             if let Some(attribute_plaintext) = item.attributes.get(attribute_key) {
                 let mut mac = MacAlg::new_from_slice(key).unwrap();
@@ -252,38 +261,56 @@ impl EncryptedItem {
     }
 }
 
-#[derive(Deserialize, Serialize, Type, Debug, Zeroize)]
+#[derive(Deserialize, Serialize, Type, Debug, Zeroize, ZeroizeOnDrop)]
 pub struct Item {
     // TODO: Zeroize the values
     #[zeroize(skip)]
-    attributes: HashMap<String, String>,
+    attributes: HashMap<String, AttributeValue>,
     label: String,
     created: u64,
     modified: u64,
-    pub password: Vec<u8>,
+    password: Vec<u8>,
 }
 
 impl Item {
-    pub fn new<P: AsRef<[u8]>>(
-        label: String,
-        attributes: HashMap<String, String>,
-        password: P,
+    pub fn new(
+        label: impl ToString,
+        attributes: HashMap<impl ToString, impl ToString>,
+        password: impl AsRef<[u8]>,
     ) -> Self {
-        let now = std::time::SystemTime::UNIX_EPOCH
-            .elapsed()
-            .unwrap()
-            .as_secs();
+        let now = now();
 
         Item {
-            attributes,
-            label,
+            attributes: attributes
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.into()))
+                .collect(),
+            label: label.to_string(),
             created: now,
             modified: now,
             password: password.as_ref().to_vec(),
         }
     }
 
-    pub fn encrypt(self, key: &[u8]) -> Result<EncryptedItem, Error> {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn set_label(&mut self, label: impl ToString) {
+        self.modified = now();
+        self.label = label.to_string();
+    }
+
+    pub fn password(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(self.password.clone())
+    }
+
+    pub fn set_password<P: AsRef<[u8]>>(&mut self, password: P) {
+        self.modified = now();
+        self.password = password.as_ref().to_vec();
+    }
+
+    pub fn encrypt(self, key: &[u8]) -> Result<EncryptedItem> {
         let decrypted = Zeroizing::new(zvariant::to_bytes(gvariant_encoding(), &self)?);
 
         let iv = EncAlg::generate_iv(rand_core::OsRng);
@@ -304,17 +331,10 @@ impl Item {
         mac.update(&blob);
         blob.append(&mut mac.finalize().into_bytes().as_slice().into());
 
-        // TODO: write hashed attributes
         let hashed_attributes = self
             .attributes
-            .into_iter()
-            .map(|(k, v)| {
-                (k, {
-                    let mut mac = MacAlg::new_from_slice(key).unwrap();
-                    mac.update(v.as_bytes());
-                    mac.finalize().into_bytes().as_slice().to_vec()
-                })
-            })
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.mac(key).into_bytes().as_slice().into()))
             .collect();
 
         Ok(EncryptedItem {
@@ -327,8 +347,32 @@ impl Item {
 impl TryFrom<&[u8]> for Item {
     type Error = Error;
 
-    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+    fn try_from(value: &[u8]) -> Result<Self> {
         Ok(zvariant::from_slice(value, gvariant_encoding())?)
+    }
+}
+
+#[derive(Deserialize, Serialize, Type, Debug, Zeroize, ZeroizeOnDrop)]
+pub struct AttributeValue(String);
+
+impl<S: ToString> From<S> for AttributeValue {
+    fn from(value: S) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl std::ops::Deref for AttributeValue {
+    type Target = str;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
+impl AttributeValue {
+    pub fn mac(&self, key: &[u8]) -> digest::CtOutput<MacAlg> {
+        let mut mac = MacAlg::new_from_slice(key).unwrap();
+        mac.update(self.0.as_bytes());
+        mac.finalize()
     }
 }
 
@@ -336,21 +380,9 @@ pub fn gvariant_encoding() -> zvariant::EncodingContext<byteorder::LE> {
     zvariant::EncodingContext::<byteorder::LE>::new_gvariant(0)
 }
 
-// TODO: use our implementation
-/*
-async fn secret() -> Result<Vec<u8>, ashpd::Error> {
-    let connection = zbus::Connection::session().await?;
-    let proxy = ashpd::desktop::secret::SecretProxy::new(&connection).await?;
-
-    let (mut x1, x2) = async_std::os::unix::net::UnixStream::pair().unwrap();
-
-    dbg!(proxy.retrieve_secret(&x2).await.unwrap());
-    drop(x2);
-    let mut buf = Vec::new();
-    x1.read_to_end(&mut buf).await.unwrap();
-
-    dbg!(buf.len());
-
-    Ok(buf)
+fn now() -> u64 {
+    std::time::SystemTime::UNIX_EPOCH
+        .elapsed()
+        .unwrap()
+        .as_secs()
 }
-*/

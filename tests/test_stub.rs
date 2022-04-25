@@ -68,7 +68,7 @@ async fn test_dump_load() {
         .search_items(HashMap::from([("my-tag", "my tag value")]), &key)
         .unwrap();
 
-    assert_eq!(loaded_items[0].password, "A Password".as_bytes());
+    assert_eq!(*loaded_items[0].password(), "A Password".as_bytes());
 }
 
 /*
