@@ -3,7 +3,7 @@ GNOME Keyring format low level api
 
 Only use this if you know what you are doing.
 
-### TODO
+### To Do
 
 - Order user calls
 - Keep proxis around
@@ -323,7 +323,6 @@ impl EncryptedItem {
 
 #[derive(Deserialize, Serialize, Type, Debug, Zeroize, ZeroizeOnDrop)]
 pub struct Item {
-    // TODO: Zeroize the values
     #[zeroize(skip)]
     attributes: HashMap<String, AttributeValue>,
     label: String,
