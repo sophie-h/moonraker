@@ -7,14 +7,14 @@ Only use this if you know what you are doing.
 
 - Generalize attribute hashing
 - Delete and overwrite intems
-- Add `Key` type
-- Add `AttributeValue` type
-- Add user layer
 - Order user calls
 - Keep proxis around
 - Make more things async
 */
-use async_std::path::Path;
+
+use async_std::prelude::*;
+
+use async_std::{fs, io, path::Path};
 use cipher::{
     block_padding::Pkcs7, crypto_common::rand_core, BlockDecryptMut, BlockEncryptMut,
     BlockSizeUser, IvSizeUser, KeyIvInit,
@@ -41,21 +41,25 @@ type MacAlg = hmac::Hmac<sha2::Sha256>;
 type EncAlg = cbc::Encryptor<aes::Aes128>;
 type DecAlg = cbc::Decryptor<aes::Aes128>;
 
-type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
     /// File header does not match `FILE_HEADER`
     FileHeaderMismatch(Option<String>),
+    /// Version bytes do not match `MAJOR_VERSION` or `MINOR_VERSION`
     VersionMismatch(Option<Vec<u8>>),
+    /// No data behind header and version bytes
     NoData,
     NoParentDir(String),
+    /// Bytes don't have the expected GVariant format
     GVariantDeserialization(zvariant::Error),
     Io(std::io::Error),
     MacError,
     HashedAttributeMac(String),
     /// XDG_DATA_HOME required for reading from default location
     NoDataDir,
+    TargetFileChanged(String),
 }
 
 impl From<zvariant::Error> for Error {
@@ -103,10 +107,6 @@ impl Keyring {
         }
     }
 
-    pub async fn load_default() -> Result<Self> {
-        Self::load(&Self::default_path()?).await
-    }
-
     /// Load from a keyring file
     pub async fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = async_std::fs::read(path).await?;
@@ -114,25 +114,62 @@ impl Keyring {
     }
 
     /// Write to a keyring file
-    pub async fn dump<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let mut tmpfile = if let Some(parent) = path.as_ref().parent() {
-            Ok(tempfile::NamedTempFile::new_in(parent)?)
+    pub async fn dump<P: AsRef<Path>>(
+        &self,
+        path: P,
+        mtime: Option<std::time::SystemTime>,
+    ) -> Result<()> {
+        // TODO: create parent dir if not exists
+        let tmp_path = if let Some(parent) = path.as_ref().parent() {
+            let rnd: String = rand::thread_rng()
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(7)
+                .map(char::from)
+                .collect();
+
+            let mut tmp_path = parent.to_path_buf();
+            tmp_path.push(format!(".tmpkeyring{}", rnd));
+
+            if !parent.exists().await {
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    //.mode(0o700)
+                    .create(parent)
+                    .await?;
+            }
+
+            Ok(tmp_path)
         } else {
             Err(Error::NoParentDir(path.as_ref().display().to_string()))
         }?;
 
+        let mut tmpfile = fs::File::create(&tmp_path).await?;
+
         let blob: Vec<u8> = self.as_bytes()?;
 
-        use std::io::Write;
-        // TODO: this is currently blocking
-        // We need a solution for race conditions
-        tmpfile.write_all(&blob)?;
-        tmpfile.persist(path.as_ref()).unwrap();
+        tmpfile.write_all(&blob).await?;
+        tmpfile.sync_all().await?;
+
+        let target_file = fs::File::open(&path).await;
+
+        let target_mtime = match target_file {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err.into()),
+            Ok(file) => file.metadata().await?.modified().ok(),
+        };
+
+        if mtime != target_mtime {
+            return Err(Error::TargetFileChanged(
+                path.as_ref().display().to_string(),
+            ));
+        }
+
+        fs::rename(tmp_path, path).await?;
 
         Ok(())
     }
 
-    pub fn search_items(&self, attributes: HashMap<&str, &str>, key: &[u8]) -> Result<Vec<Item>> {
+    pub fn search_items(&self, attributes: HashMap<&str, &str>, key: &Key) -> Result<Vec<Item>> {
         let hashed_search: Vec<(&str, _)> = attributes
             .into_iter()
             .map(|(k, v)| {
@@ -179,14 +216,14 @@ impl Keyring {
         }
     }
 
-    pub fn derive_key(&self, secret: &[u8]) -> Zeroizing<Vec<u8>> {
-        let mut key = Zeroizing::new(vec![0; EncAlg::block_size()]);
+    pub fn derive_key(&self, secret: &[u8]) -> Key {
+        let mut key = Key(vec![0; EncAlg::block_size()]);
 
         pbkdf2::pbkdf2::<hmac::Hmac<sha2::Sha256>>(
             secret,
             &self.salt,
             self.iteration_count,
-            &mut key,
+            key.as_mut(),
         );
 
         key
@@ -224,11 +261,11 @@ pub struct EncryptedItem {
 }
 
 impl EncryptedItem {
-    pub fn decrypt(mut self, key: &[u8]) -> Result<Item> {
+    pub fn decrypt(mut self, key: &Key) -> Result<Item> {
         let mac_tag = self.blob.split_off(self.blob.len() - MacAlg::output_size());
 
         // verify item
-        let mut mac = MacAlg::new_from_slice(key).unwrap();
+        let mut mac = MacAlg::new_from_slice(key.as_ref()).unwrap();
         mac.update(&self.blob);
         mac.verify_slice(&mac_tag)?;
 
@@ -236,7 +273,7 @@ impl EncryptedItem {
         let mut data = Zeroizing::new(self.blob);
 
         // decrypt item
-        let decrypted = DecAlg::new(key.into(), iv.as_slice().into())
+        let decrypted = DecAlg::new(key.as_ref().into(), iv.as_slice().into())
             .decrypt_padded_mut::<Pkcs7>(&mut data)
             .unwrap();
 
@@ -250,11 +287,11 @@ impl EncryptedItem {
     fn validate(
         hashed_attributes: &HashMap<String, Vec<u8>>,
         item: &Item,
-        key: &[u8],
+        key: &Key,
     ) -> Result<()> {
         for (attribute_key, hashed_attribute) in hashed_attributes.iter() {
             if let Some(attribute_plaintext) = item.attributes.get(attribute_key) {
-                let mut mac = MacAlg::new_from_slice(key).unwrap();
+                let mut mac = MacAlg::new_from_slice(key.as_ref()).unwrap();
                 mac.update(attribute_plaintext.as_bytes());
                 if mac.verify_slice(hashed_attribute).is_err() {
                     return Err(Error::HashedAttributeMac(attribute_key.to_string()));
@@ -317,7 +354,7 @@ impl Item {
         self.password = password.as_ref().to_vec();
     }
 
-    pub fn encrypt(self, key: &[u8]) -> Result<EncryptedItem> {
+    pub fn encrypt(self, key: &Key) -> Result<EncryptedItem> {
         let decrypted = Zeroizing::new(zvariant::to_bytes(gvariant_encoding(), &self)?);
 
         let iv = EncAlg::generate_iv(rand_core::OsRng);
@@ -325,7 +362,7 @@ impl Item {
         let mut blob = vec![0; decrypted.len() + EncAlg::block_size()];
 
         // Unwrapping since adding `CIPHER_BLOCK_SIZE` to array is enough space for PKCS7
-        let encrypted_len = EncAlg::new(key.into(), &iv)
+        let encrypted_len = EncAlg::new(key.as_ref().into(), &iv)
             .encrypt_padded_b2b_mut::<Pkcs7>(&decrypted, &mut blob)
             .unwrap()
             .len();
@@ -334,7 +371,7 @@ impl Item {
         blob.append(&mut iv.as_slice().into());
 
         // Unwrapping since arbitrary keylength allowed
-        let mut mac = MacAlg::new_from_slice(key).unwrap();
+        let mut mac = MacAlg::new_from_slice(key.as_ref()).unwrap();
         mac.update(&blob);
         blob.append(&mut mac.finalize().into_bytes().as_slice().into());
 
@@ -376,10 +413,26 @@ impl std::ops::Deref for AttributeValue {
 }
 
 impl AttributeValue {
-    pub fn mac(&self, key: &[u8]) -> digest::CtOutput<MacAlg> {
-        let mut mac = MacAlg::new_from_slice(key).unwrap();
+    pub fn mac(&self, key: &Key) -> digest::CtOutput<MacAlg> {
+        let mut mac = MacAlg::new_from_slice(key.as_ref()).unwrap();
         mac.update(self.0.as_bytes());
         mac.finalize()
+    }
+}
+
+/// AES key
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct Key(Vec<u8>);
+
+impl AsRef<[u8]> for Key {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl AsMut<[u8]> for Key {
+    fn as_mut(&mut self) -> &mut [u8] {
+        &mut self.0
     }
 }
 

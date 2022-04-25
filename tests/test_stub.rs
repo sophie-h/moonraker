@@ -2,8 +2,8 @@ use moonraker::keyring;
 
 use std::collections::HashMap;
 
-async fn get_key() -> Result<zeroize::Zeroizing<Vec<u8>>, keyring::Error> {
-    let keyring = keyring::api::Keyring::load_default().await?;
+async fn get_key() -> Result<keyring::api::Key, keyring::Error> {
+    let keyring = keyring::api::Keyring::load(keyring::api::Keyring::default_path()?).await?;
 
     let secret = [
         44, 173, 251, 20, 203, 56, 241, 169, 91, 54, 51, 244, 40, 40, 202, 92, 71, 233, 174, 17,
@@ -19,6 +19,8 @@ async fn get_key() -> Result<zeroize::Zeroizing<Vec<u8>>, keyring::Error> {
 async fn test_dump_load() {
     let key = get_key().await.unwrap();
 
+    let _silent = std::fs::remove_file("/tmp/test.keyring");
+
     let mut new_keyring = keyring::api::Keyring::new();
     new_keyring.items.push(
         keyring::Item::new(
@@ -29,7 +31,7 @@ async fn test_dump_load() {
         .encrypt(&key)
         .unwrap(),
     );
-    new_keyring.dump("/tmp/test.keyring").await.unwrap();
+    new_keyring.dump("/tmp/test.keyring", None).await.unwrap();
 
     let loaded_keyring = keyring::api::Keyring::load("/tmp/test.keyring")
         .await
@@ -39,4 +41,6 @@ async fn test_dump_load() {
         .unwrap();
 
     assert_eq!(*loaded_items[0].password(), "A Password".as_bytes());
+
+    let _silent = std::fs::remove_file("/tmp/test.keyring");
 }
